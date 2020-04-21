@@ -1,0 +1,419 @@
+<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg version="1.1" width="1200" height="470" onload="init(evt)" viewBox="0 0 1200 470" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><!--Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples.--><!--NOTES: --><defs><linearGradient id="background" y1="0" y2="1" x1="0" x2="0"><stop stop-color="#eeeeee" offset="5%"/><stop stop-color="#eeeeb0" offset="95%"/></linearGradient></defs><style type="text/css">
+text { font-family:"Verdana"; font-size:12px; fill:rgb(0,0,0); }
+#title { text-anchor:middle; font-size:17px; }
+#search { opacity:0.1; cursor:pointer; }
+#search:hover, #search.show { opacity:1; }
+#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+#unzoom { cursor:pointer; }
+#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+.hide { display:none; }
+.parent { opacity:0.5; }
+</style><script type="text/ecmascript"><![CDATA[var nametype = 'Function:';
+var fontsize = 12;
+var fontwidth = 0.59;
+var xpad = 10;
+var inverted = true;
+var searchcolor = 'rgb(230,0,230)';
+var fluiddrawing = true;
+var truncate_text_right = false;]]><![CDATA["use strict";
+var details, searchbtn, unzoombtn, matchedtxt, svg, searching, frames;
+function init(evt) {
+    details = document.getElementById("details").firstChild;
+    searchbtn = document.getElementById("search");
+    unzoombtn = document.getElementById("unzoom");
+    matchedtxt = document.getElementById("matched");
+    svg = document.getElementsByTagName("svg")[0];
+    frames = document.getElementById("frames");
+    searching = 0;
+
+    // Use GET parameters to restore a flamegraph's state.
+    var restore_state = function() {
+        var params = get_params();
+        if (params.x && params.y)
+            zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+        if (params.s)
+            search(params.s);
+    };
+
+    if (fluiddrawing) {
+        // Make width dynamic so the SVG fits its parent's width.
+        svg.removeAttribute("width");
+        // Edge requires us to have a viewBox that gets updated with size changes.
+        var isEdge = /Edge\/\d./i.test(navigator.userAgent);
+        if (!isEdge) {
+          svg.removeAttribute("viewBox");
+        }
+        var update_for_width_change = function() {
+            if (isEdge) {
+                svg.attributes.viewBox.value = "0 0 " + svg.width.baseVal.value + " " + svg.height.baseVal.value;
+            }
+
+            // Keep consistent padding on left and right of frames container.
+            frames.attributes.width.value = svg.width.baseVal.value - xpad * 2;
+
+            // Text truncation needs to be adjusted for the current width.
+            var el = frames.children;
+            for(var i = 0; i < el.length; i++) {
+                update_text(el[i]);
+            }
+
+            // Keep search elements at a fixed distance from right edge.
+            var svgWidth = svg.width.baseVal.value;
+            searchbtn.attributes.x.value = svgWidth - xpad - 100;
+            matchedtxt.attributes.x.value = svgWidth - xpad - 100;
+        };
+        window.addEventListener('resize', function() {
+            update_for_width_change();
+        });
+        // This needs to be done asynchronously for Safari to work.
+        setTimeout(function() {
+            unzoom();
+            update_for_width_change();
+            restore_state();
+        }, 0);
+    } else {
+        restore_state();
+    }
+}
+// event listeners
+window.addEventListener("click", function(e) {
+    var target = find_group(e.target);
+    if (target) {
+        if (target.nodeName == "a") {
+            if (e.ctrlKey === false) return;
+            e.preventDefault();
+        }
+        if (target.classList.contains("parent")) unzoom();
+        zoom(target);
+
+        // set parameters for zoom state
+        var el = target.querySelector("rect");
+        if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+            var params = get_params()
+            params.x = el.attributes._orig_x.value;
+            params.y = el.attributes.y.value;
+            history.replaceState(null, null, parse_params(params));
+        }
+    }
+    else if (e.target.id == "unzoom") {
+        unzoom();
+
+        // remove zoom state
+        var params = get_params();
+        if (params.x) delete params.x;
+        if (params.y) delete params.y;
+        history.replaceState(null, null, parse_params(params));
+    }
+    else if (e.target.id == "search") search_prompt();
+}, false)
+// mouse-over for info
+// show
+window.addEventListener("mouseover", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = nametype + " " + g_to_text(target);
+}, false)
+// clear
+window.addEventListener("mouseout", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = ' ';
+}, false)
+// ctrl-F for search
+window.addEventListener("keydown",function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+        e.preventDefault();
+        search_prompt();
+    }
+}, false)
+// functions
+function get_params() {
+    var params = {};
+    var paramsarr = window.location.search.substr(1).split('&');
+    for (var i = 0; i < paramsarr.length; ++i) {
+        var tmp = paramsarr[i].split("=");
+        if (!tmp[0] || !tmp[1]) continue;
+        params[tmp[0]]  = decodeURIComponent(tmp[1]);
+    }
+    return params;
+}
+function parse_params(params) {
+    var uri = "?";
+    for (var key in params) {
+        uri += key + '=' + encodeURIComponent(params[key]) + '&';
+    }
+    if (uri.slice(-1) == "&")
+        uri = uri.substring(0, uri.length - 1);
+    if (uri == '?')
+        uri = window.location.href.split('?')[0];
+    return uri;
+}
+function find_child(node, selector) {
+    var children = node.querySelectorAll(selector);
+    if (children.length) return children[0];
+    return;
+}
+function find_group(node) {
+    var parent = node.parentElement;
+    if (!parent) return;
+    if (parent.id == "frames") return node;
+    return find_group(parent);
+}
+function orig_save(e, attr, val) {
+    if (e.attributes["_orig_" + attr] != undefined) return;
+    if (e.attributes[attr] == undefined) return;
+    if (val == undefined) val = e.attributes[attr].value;
+    e.setAttribute("_orig_" + attr, val);
+}
+function orig_load(e, attr) {
+    if (e.attributes["_orig_"+attr] == undefined) return;
+    e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+    e.removeAttribute("_orig_" + attr);
+}
+function g_to_text(e) {
+    var text = find_child(e, "title").firstChild.nodeValue;
+    return (text)
+}
+function g_to_func(e) {
+    var func = g_to_text(e);
+    // if there's any manipulation we want to do to the function
+    // name before it's searched, do it here before returning.
+    return (func);
+}
+function update_text(e) {
+    var r = find_child(e, "rect");
+    var t = find_child(e, "text");
+    var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+    var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+    t.attributes.x.value = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+    // Smaller than this size won't fit anything
+    if (w < 2 * fontsize * fontwidth) {
+        t.textContent = "";
+        return;
+    }
+    t.textContent = txt;
+    // Fit in full text width
+    if (/^ *\$/.test(txt) || t.getComputedTextLength() < w)
+        return;
+    if (truncate_text_right) {
+        // Truncate the right side of the text.
+        for (var x = txt.length - 2; x > 0; x--) {
+            if (t.getSubStringLength(0, x + 2) <= w) {
+                t.textContent = txt.substring(0, x) + "..";
+                return;
+            }
+        }
+    } else {
+        // Truncate the left side of the text.
+        for (var x = 2; x < txt.length; x++) {
+            if (t.getSubStringLength(x - 2, txt.length) <= w) {
+                t.textContent = ".." + txt.substring(x, txt.length);
+                return;
+            }
+        }
+    }
+    t.textContent = "";
+}
+// zoom
+function zoom_reset(e) {
+    if (e.attributes != undefined) {
+        orig_load(e, "x");
+        orig_load(e, "width");
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_reset(c[i]);
+    }
+}
+function zoom_child(e, x, ratio) {
+    if (e.attributes != undefined) {
+        if (e.attributes.x != undefined) {
+            orig_save(e, "x");
+            e.attributes.x.value = format_percent((parseFloat(e.attributes.x.value) - x) * ratio);
+            if (e.tagName == "text") {
+                e.attributes.x.value = format_percent(parseFloat(find_child(e.parentNode, "rect[x]").attributes.x.value) + (100 * 3 / frames.attributes.width.value));
+            }
+        }
+        if (e.attributes.width != undefined) {
+            orig_save(e, "width");
+            e.attributes.width.value = format_percent(parseFloat(e.attributes.width.value) * ratio);
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_child(c[i], x, ratio);
+    }
+}
+function zoom_parent(e) {
+    if (e.attributes) {
+        if (e.attributes.x != undefined) {
+            orig_save(e, "x");
+            e.attributes.x.value = "0.0%";
+        }
+        if (e.attributes.width != undefined) {
+            orig_save(e, "width");
+            e.attributes.width.value = "100.0%";
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_parent(c[i]);
+    }
+}
+function zoom(node) {
+    var attr = find_child(node, "rect").attributes;
+    var width = parseFloat(attr.width.value);
+    var xmin = parseFloat(attr.x.value);
+    var xmax = xmin + width;
+    var ymin = parseFloat(attr.y.value);
+    var ratio = 100 / width;
+    // XXX: Workaround for JavaScript float issues (fix me)
+    var fudge = 0.001;
+    unzoombtn.classList.remove("hide");
+    var el = frames.children;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var a = find_child(e, "rect").attributes;
+        var ex = parseFloat(a.x.value);
+        var ew = parseFloat(a.width.value);
+        // Is it an ancestor
+        if (!inverted) {
+            var upstack = parseFloat(a.y.value) > ymin;
+        } else {
+            var upstack = parseFloat(a.y.value) < ymin;
+        }
+        if (upstack) {
+            // Direct ancestor
+            if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+                e.classList.add("parent");
+                zoom_parent(e);
+                update_text(e);
+            }
+            // not in current path
+            else
+                e.classList.add("hide");
+        }
+        // Children maybe
+        else {
+            // no common path
+            if (ex < xmin || ex + fudge >= xmax) {
+                e.classList.add("hide");
+            }
+            else {
+                zoom_child(e, xmin, ratio);
+                update_text(e);
+            }
+        }
+    }
+}
+function unzoom() {
+    unzoombtn.classList.add("hide");
+    var el = frames.children;
+    for(var i = 0; i < el.length; i++) {
+        el[i].classList.remove("parent");
+        el[i].classList.remove("hide");
+        zoom_reset(el[i]);
+        update_text(el[i]);
+    }
+}
+// search
+function reset_search() {
+    var el = document.querySelectorAll("#frames rect");
+    for (var i = 0; i < el.length; i++) {
+        orig_load(el[i], "fill")
+    }
+    var params = get_params();
+    delete params.s;
+    history.replaceState(null, null, parse_params(params));
+}
+function search_prompt() {
+    if (!searching) {
+        var term = prompt("Enter a search term (regexp " +
+            "allowed, eg: ^ext4_)", "");
+        if (term != null) {
+            search(term)
+        }
+    } else {
+        reset_search();
+        searching = 0;
+        searchbtn.classList.remove("show");
+        searchbtn.firstChild.nodeValue = "Search"
+        matchedtxt.classList.add("hide");
+        matchedtxt.firstChild.nodeValue = ""
+    }
+}
+function search(term) {
+    var re = new RegExp(term);
+    var el = frames.children;
+    var matches = new Object();
+    var maxwidth = 0;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var func = g_to_func(e);
+        var rect = find_child(e, "rect");
+        if (func == null || rect == null)
+            continue;
+        // Save max width. Only works as we have a root frame
+        var w = parseFloat(rect.attributes.width.value);
+        if (w > maxwidth)
+            maxwidth = w;
+        if (func.match(re)) {
+            // highlight
+            var x = parseFloat(rect.attributes.x.value);
+            orig_save(rect, "fill");
+            rect.attributes.fill.value = searchcolor;
+            // remember matches
+            if (matches[x] == undefined) {
+                matches[x] = w;
+            } else {
+                if (w > matches[x]) {
+                    // overwrite with parent
+                    matches[x] = w;
+                }
+            }
+            searching = 1;
+        }
+    }
+    if (!searching)
+        return;
+    var params = get_params();
+    params.s = term;
+    history.replaceState(null, null, parse_params(params));
+
+    searchbtn.classList.add("show");
+    searchbtn.firstChild.nodeValue = "Reset Search";
+    // calculate percent matched, excluding vertical overlap
+    var count = 0;
+    var lastx = -1;
+    var lastw = 0;
+    var keys = Array();
+    for (k in matches) {
+        if (matches.hasOwnProperty(k))
+            keys.push(k);
+    }
+    // sort the matched frames by their x location
+    // ascending, then width descending
+    keys.sort(function(a, b){
+        return a - b;
+    });
+    // Step through frames saving only the biggest bottom-up frames
+    // thanks to the sort order. This relies on the tree property
+    // where children are always smaller than their parents.
+    var fudge = 0.0001;    // JavaScript floating point
+    for (var k in keys) {
+        var x = parseFloat(keys[k]);
+        var w = matches[keys[k]];
+        if (x >= lastx + lastw - fudge) {
+            count += w;
+            lastx = x;
+            lastw = w;
+        }
+    }
+    // display matched percent
+    matchedtxt.classList.remove("hide");
+    var pct = 100 * count / maxwidth;
+    if (pct != 100) pct = pct.toFixed(1);
+    matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+}
+function format_percent(n) {
+    return n.toFixed(4) + "%";
+}
+]]></script><rect x="0" y="0" width="100%" height="470" fill="url(#background)"/><text id="title" x="50.0000%" y="24.00">py-spy</text><text id="details" x="10" y="453.00"> </text><text id="unzoom" class="hide" x="10" y="24.00">Reset Zoom</text><text id="search" x="1090" y="24.00">Search</text><text id="matched" x="1090" y="453.00"> </text><svg id="frames" x="10" width="1180"><g><title>__init__ (pandas/core/series.py:305) (31 samples, 1.12%)</title><rect x="0.5065%" y="100" width="1.1216%" height="15" fill="rgb(227,0,7)"/><text x="0.7565%" y="110.50"></text></g><g><title>&lt;module&gt; (profile_geo.py:153) (36 samples, 1.30%)</title><rect x="0.3618%" y="52" width="1.3025%" height="15" fill="rgb(217,0,24)"/><text x="0.6118%" y="62.50"></text></g><g><title>gen_st_area_data (profile_geo.py:66) (36 samples, 1.30%)</title><rect x="0.3618%" y="68" width="1.3025%" height="15" fill="rgb(221,193,54)"/><text x="0.6118%" y="78.50"></text></g><g><title>_trans (profile_geo.py:43) (32 samples, 1.16%)</title><rect x="0.5065%" y="84" width="1.1577%" height="15" fill="rgb(248,212,6)"/><text x="0.7565%" y="94.50"></text></g><g><title>0x7fe7c0ed378b (libc-2.27.so) (34 samples, 1.23%)</title><rect x="16.8234%" y="420" width="1.2301%" height="15" fill="rgb(208,68,35)"/><text x="17.0734%" y="430.50"></text></g><g><title>arrow::BufferBuilder::Resize (libarrow_python.so.16.0.0) (58 samples, 2.10%)</title><rect x="15.9913%" y="292" width="2.0984%" height="15" fill="rgb(232,128,0)"/><text x="16.2413%" y="302.50">a..</text></g><g><title>arrow::PoolBuffer::Resize (libarrow.so.16.0.0) (58 samples, 2.10%)</title><rect x="15.9913%" y="308" width="2.0984%" height="15" fill="rgb(207,160,47)"/><text x="16.2413%" y="318.50">a..</text></g><g><title>arrow::BaseMemoryPoolImpl&lt;arrow::(anonymous namespace)::JemallocAllocator&gt;::Reallocate (libarrow.so.16.0.0) (58 samples, 2.10%)</title><rect x="15.9913%" y="324" width="2.0984%" height="15" fill="rgb(228,23,34)"/><text x="16.2413%" y="334.50">a..</text></g><g><title>je_arrow_rallocx (jemalloc.c:3279) (58 samples, 2.10%)</title><rect x="15.9913%" y="340" width="2.0984%" height="15" fill="rgb(218,30,26)"/><text x="16.2413%" y="350.50">j..</text></g><g><title>iralloct (jemalloc_internal_inlines_c.h:192) (58 samples, 2.10%)</title><rect x="15.9913%" y="356" width="2.0984%" height="15" fill="rgb(220,122,19)"/><text x="16.2413%" y="366.50">i..</text></g><g><title>je_arrow_private_je_arena_ralloc (arena.c:1823) (58 samples, 2.10%)</title><rect x="15.9913%" y="372" width="2.0984%" height="15" fill="rgb(250,228,42)"/><text x="16.2413%" y="382.50">j..</text></g><g><title>je_arrow_private_je_large_ralloc (large.c:312) (57 samples, 2.06%)</title><rect x="16.0275%" y="388" width="2.0622%" height="15" fill="rgb(240,193,28)"/><text x="16.2775%" y="398.50">j..</text></g><g><title>memcpy (string3.h:52) (57 samples, 2.06%)</title><rect x="16.0275%" y="404" width="2.0622%" height="15" fill="rgb(216,20,37)"/><text x="16.2775%" y="414.50">m..</text></g><g><title>arrow::Status::Status (libarrow_python.so.16.0.0) (34 samples, 1.23%)</title><rect x="18.0897%" y="292" width="1.2301%" height="15" fill="rgb(206,188,39)"/><text x="18.3397%" y="302.50"></text></g><g><title>arrow::BaseBinaryBuilder&lt;arrow::BinaryType&gt;::Append (libarrow_python.so.16.0.0) (330 samples, 11.94%)</title><rect x="7.4168%" y="276" width="11.9392%" height="15" fill="rgb(217,207,13)"/><text x="7.6668%" y="286.50">arrow::BaseBinaryB..</text></g><g><title>arrow::py::detail::BuilderAppend (libarrow_python.so.16.0.0) (457 samples, 16.53%)</title><rect x="5.5716%" y="260" width="16.5340%" height="15" fill="rgb(231,73,38)"/><text x="5.8216%" y="270.50">arrow::py::detail::Builder..</text></g><g><title>arrow::py::PyBytesView::FromString (libarrow_python.so.16.0.0) (61 samples, 2.21%)</title><rect x="19.8987%" y="276" width="2.2069%" height="15" fill="rgb(225,20,46)"/><text x="20.1487%" y="286.50">a..</text></g><g><title>ST_Area (arctern/_wrapper_func.py:838) (558 samples, 20.19%)</title><rect x="2.1708%" y="116" width="20.1881%" height="15" fill="rgb(210,31,41)"/><text x="2.4208%" y="126.50">ST_Area (arctern/_wrapper_func.p..</text></g><g><title>array (pyarrow/lib.cpython-38-x86_64-linux-gnu.so) (558 samples, 20.19%)</title><rect x="2.1708%" y="132" width="20.1881%" height="15" fill="rgb(221,200,47)"/><text x="2.4208%" y="142.50">array (pyarrow/lib.cpython-38-x8..</text></g><g><title>lib__ndarray_to_array (pyarrow/lib.cpython-38-x86_64-linux-gnu.so) (558 samples, 20.19%)</title><rect x="2.1708%" y="148" width="20.1881%" height="15" fill="rgb(226,26,5)"/><text x="2.4208%" y="158.50">lib__ndarray_to_array (pyarrow/l..</text></g><g><title>arrow::py::NdarrayToArrow (libarrow_python.so.16.0.0) (558 samples, 20.19%)</title><rect x="2.1708%" y="164" width="20.1881%" height="15" fill="rgb(249,33,26)"/><text x="2.4208%" y="174.50">arrow::py::NdarrayToArrow (libar..</text></g><g><title>arrow::py::NumPyConverter::Convert (libarrow_python.so.16.0.0) (558 samples, 20.19%)</title><rect x="2.1708%" y="180" width="20.1881%" height="15" fill="rgb(235,183,28)"/><text x="2.4208%" y="190.50">arrow::py::NumPyConverter::Conve..</text></g><g><title>arrow::py::ConvertPySequence (libarrow_python.so.16.0.0) (558 samples, 20.19%)</title><rect x="2.1708%" y="196" width="20.1881%" height="15" fill="rgb(221,5,38)"/><text x="2.4208%" y="206.50">arrow::py::ConvertPySequence (li..</text></g><g><title>arrow::py::TypedConverter&lt;arrow::BinaryType, arrow::py::BinaryLikeConverter&lt;arrow::BinaryType, (arrow::py::NullCoding)1&gt;, (arrow::py::NullCoding)1&gt;::AppendMultiple (libarrow_python.so.16.0.0) (558 samples, 20.19%)</title><rect x="2.1708%" y="212" width="20.1881%" height="15" fill="rgb(247,18,42)"/><text x="2.4208%" y="222.50">arrow::py::TypedConverter&lt;arrow:..</text></g><g><title>arrow::py::internal::VisitSequenceGeneric&lt;arrow::Status arrow::py::internal::VisitSequence&lt;arrow::py::TypedConverter&lt;arrow::BinaryType, arrow::py::BinaryLikeConverter&lt;arrow::BinaryType, (arrow::py::NullCoding)1&gt;, (arrow::py::NullCoding)1&gt;::AppendMultiple(_object*, long)::{lambda(_object*, bool*)#1}&gt;(_object*, arrow::py::TypedConverter&lt;arrow::BinaryType, arrow::py::BinaryLikeConverter&lt;arrow::BinaryType, (arrow::py::NullCoding)1&gt;, (arrow::py::NullCoding)1&gt;::AppendMultiple(_object*, long)::{lambda(_object*, bool*)#1}&amp;&amp;)::{lambda(_object*, long, bool*)#1}&gt; (libarrow_python.so.16.0.0) (558 samples, 20.19%)</title><rect x="2.1708%" y="228" width="20.1881%" height="15" fill="rgb(241,131,45)"/><text x="2.4208%" y="238.50">arrow::py::internal::VisitSequen..</text></g><g><title>arrow::py::TypedConverter&lt;arrow::BinaryType, arrow::py::BinaryLikeConverter&lt;arrow::BinaryType, (arrow::py::NullCoding)1&gt;, (arrow::py::NullCoding)1&gt;::AppendSingle (libarrow_python.so.16.0.0) (519 samples, 18.78%)</title><rect x="3.5818%" y="244" width="18.7771%" height="15" fill="rgb(249,31,29)"/><text x="3.8318%" y="254.50">arrow::py::TypedConverter&lt;arr..</text></g><g><title>OGRLinearRing::~OGRLinearRing (libgdal.so.26.0.4) (83 samples, 3.00%)</title><rect x="25.3980%" y="324" width="3.0029%" height="15" fill="rgb(225,111,53)"/><text x="25.6480%" y="334.50">OGR..</text></g><g><title>OGRSimpleCurve::~OGRSimpleCurve (libgdal.so.26.0.4) (60 samples, 2.17%)</title><rect x="26.2301%" y="340" width="2.1708%" height="15" fill="rgb(238,160,17)"/><text x="26.4801%" y="350.50">O..</text></g><g><title>cfree (libc-2.27.so) (40 samples, 1.45%)</title><rect x="26.9537%" y="356" width="1.4472%" height="15" fill="rgb(214,148,48)"/><text x="27.2037%" y="366.50"></text></g><g><title>cfree (libc-2.27.so) (151 samples, 5.46%)</title><rect x="28.5094%" y="324" width="5.4631%" height="15" fill="rgb(232,36,49)"/><text x="28.7594%" y="334.50">cfree (..</text></g><g><title>OGRCurveCollection::empty (libgdal.so.26.0.4) (272 samples, 9.84%)</title><rect x="24.3488%" y="308" width="9.8408%" height="15" fill="rgb(209,103,24)"/><text x="24.5988%" y="318.50">OGRCurveCollec..</text></g><g><title>OGRCurvePolygon::~OGRCurvePolygon (libgdal.so.26.0.4) (291 samples, 10.53%)</title><rect x="23.7699%" y="292" width="10.5282%" height="15" fill="rgb(229,88,8)"/><text x="24.0199%" y="302.50">OGRCurvePolygon..</text></g><g><title>OGRPolygon::~OGRPolygon (libgdal.so.26.0.4) (308 samples, 11.14%)</title><rect x="23.4081%" y="276" width="11.1433%" height="15" fill="rgb(213,181,19)"/><text x="23.6581%" y="286.50">OGRPolygon::~OGR..</text></g><g><title>operator new (new_op.cc:50) (40 samples, 1.45%)</title><rect x="43.3068%" y="356" width="1.4472%" height="15" fill="rgb(254,191,54)"/><text x="43.5568%" y="366.50"></text></g><g><title>__libc_malloc (libc-2.27.so) (35 samples, 1.27%)</title><rect x="43.4877%" y="372" width="1.2663%" height="15" fill="rgb(241,83,37)"/><text x="43.7377%" y="382.50"></text></g><g><title>OGRGeometryFactory::createGeometry (libgdal.so.26.0.4) (129 samples, 4.67%)</title><rect x="40.1954%" y="324" width="4.6671%" height="15" fill="rgb(233,36,39)"/><text x="40.4454%" y="334.50">OGRGe..</text></g><g><title>operator new (new_opnt.cc:42) (58 samples, 2.10%)</title><rect x="42.7641%" y="340" width="2.0984%" height="15" fill="rgb(226,3,54)"/><text x="43.0141%" y="350.50">o..</text></g><g><title>OGRReadWKBGeometryType (libgdal.so.26.0.4) (75 samples, 2.71%)</title><rect x="56.5485%" y="388" width="2.7135%" height="15" fill="rgb(245,192,40)"/><text x="56.7985%" y="398.50">OG..</text></g><g><title>OGRGeometry::importPreambleFromWkb (libgdal.so.26.0.4) (159 samples, 5.75%)</title><rect x="54.4863%" y="372" width="5.7525%" height="15" fill="rgb(238,167,29)"/><text x="54.7363%" y="382.50">OGRGeom..</text></g><g><title>OGRGeometry::importPreambleOfCollectionFromWkb (libgdal.so.26.0.4) (359 samples, 12.99%)</title><rect x="47.9740%" y="356" width="12.9884%" height="15" fill="rgb(232,182,51)"/><text x="48.2240%" y="366.50">OGRGeometry::importP..</text></g><g><title>OGRCurveCollection::importPreambleFromWkb (libgdal.so.26.0.4) (651 samples, 23.55%)</title><rect x="46.9609%" y="340" width="23.5528%" height="15" fill="rgb(231,60,39)"/><text x="47.2109%" y="350.50">OGRCurveCollection::importPreambleFro..</text></g><g><title>VSICallocVerbose (libgdal.so.26.0.4) (264 samples, 9.55%)</title><rect x="60.9624%" y="356" width="9.5514%" height="15" fill="rgb(208,69,12)"/><text x="61.2124%" y="366.50">VSICallocVerbo..</text></g><g><title>__libc_calloc (libc-2.27.so) (243 samples, 8.79%)</title><rect x="61.7221%" y="372" width="8.7916%" height="15" fill="rgb(235,93,37)"/><text x="61.9721%" y="382.50">__libc_callo..</text></g><g><title>0x7fe7c0eac6c2 (libc-2.27.so) (58 samples, 2.10%)</title><rect x="68.4153%" y="388" width="2.0984%" height="15" fill="rgb(213,116,39)"/><text x="68.6653%" y="398.50">0..</text></g><g><title>OGRLinearRing::OGRLinearRing (libgdal.so.26.0.4) (34 samples, 1.23%)</title><rect x="70.5137%" y="340" width="1.2301%" height="15" fill="rgb(222,207,29)"/><text x="70.7637%" y="350.50"></text></g><g><title>OGRLineString::OGRLineString (libgdal.so.26.0.4) (30 samples, 1.09%)</title><rect x="70.6585%" y="356" width="1.0854%" height="15" fill="rgb(206,96,30)"/><text x="70.9085%" y="366.50"></text></g><g><title>OGRSimpleCurve::setNumPoints (libgdal.so.26.0.4) (92 samples, 3.33%)</title><rect x="77.5687%" y="356" width="3.3285%" height="15" fill="rgb(218,138,4)"/><text x="77.8187%" y="366.50">OGR..</text></g><g><title>VSIReallocVerbose (libgdal.so.26.0.4) (62 samples, 2.24%)</title><rect x="78.6541%" y="372" width="2.2431%" height="15" fill="rgb(250,191,14)"/><text x="78.9041%" y="382.50">V..</text></g><g><title>OGRLinearRing::_importFromWkb (libgdal.so.26.0.4) (256 samples, 9.26%)</title><rect x="71.7438%" y="340" width="9.2619%" height="15" fill="rgb(239,60,40)"/><text x="71.9938%" y="350.50">OGRLinearRing..</text></g><g><title>operator new (new_op.cc:50) (40 samples, 1.45%)</title><rect x="81.2952%" y="340" width="1.4472%" height="15" fill="rgb(206,27,48)"/><text x="81.5452%" y="350.50"></text></g><g><title>__libc_malloc (libc-2.27.so) (37 samples, 1.34%)</title><rect x="81.4038%" y="356" width="1.3386%" height="15" fill="rgb(225,35,8)"/><text x="81.6538%" y="366.50"></text></g><g><title>OGRPolygon::importFromWkb (libgdal.so.26.0.4) (1,043 samples, 37.74%)</title><rect x="45.0434%" y="324" width="37.7352%" height="15" fill="rgb(250,213,24)"/><text x="45.2934%" y="334.50">OGRPolygon::importFromWkb (libgdal.so.26.0.4)</text></g><g><title>arctern::gis::gdal::Wrapper_createFromWkb (libarctern.so) (1,424 samples, 51.52%)</title><rect x="34.5514%" y="276" width="51.5195%" height="15" fill="rgb(247,123,22)"/><text x="34.8014%" y="286.50">arctern::gis::gdal::Wrapper_createFromWkb (libarctern.so)</text></g><g><title>OGRGeometryFactory::createFromWkb (libgdal.so.26.0.4) (1,368 samples, 49.49%)</title><rect x="36.5774%" y="292" width="49.4935%" height="15" fill="rgb(231,138,38)"/><text x="36.8274%" y="302.50">OGRGeometryFactory::createFromWkb (libgdal.so.26.0.4)</text></g><g><title>OGRGeometryFactory::createFromWkb (libgdal.so.26.0.4) (1,356 samples, 49.06%)</title><rect x="37.0116%" y="308" width="49.0593%" height="15" fill="rgb(231,145,46)"/><text x="37.2616%" y="318.50">OGRGeometryFactory::createFromWkb (libgdal.so.26.0.4)</text></g><g><title>OGRReadWKBGeometryType (libgdal.so.26.0.4) (91 samples, 3.29%)</title><rect x="82.7786%" y="324" width="3.2923%" height="15" fill="rgb(251,118,11)"/><text x="83.0286%" y="334.50">OGR..</text></g><g><title>cfree (libc-2.27.so) (51 samples, 1.85%)</title><rect x="86.0709%" y="276" width="1.8452%" height="15" fill="rgb(217,147,25)"/><text x="86.3209%" y="286.50">c..</text></g><g><title>arctern::gis::gdal::AreaVisitor::visit (libarctern.so) (173 samples, 6.26%)</title><rect x="90.3763%" y="292" width="6.2590%" height="15" fill="rgb(247,81,37)"/><text x="90.6263%" y="302.50">arctern:..</text></g><g><title>OGRCurvePolygon::get_Area (libgdal.so.26.0.4) (168 samples, 6.08%)</title><rect x="90.5572%" y="308" width="6.0781%" height="15" fill="rgb(209,12,38)"/><text x="90.8072%" y="318.50">OGRCurve..</text></g><g><title>OGRSimpleCurve::get_LinearArea (libgdal.so.26.0.4) (123 samples, 4.45%)</title><rect x="92.1852%" y="324" width="4.4501%" height="15" fill="rgb(227,1,9)"/><text x="92.4352%" y="334.50">OGRSi..</text></g><g><title>&lt;module&gt; (profile_geo.py:165) (2,696 samples, 97.54%)</title><rect x="2.1346%" y="52" width="97.5398%" height="15" fill="rgb(248,47,43)"/><text x="2.3846%" y="62.50">&lt;module&gt; (profile_geo.py:165)</text></g><g><title>wrapper (profile_geo.py:30) (2,696 samples, 97.54%)</title><rect x="2.1346%" y="68" width="97.5398%" height="15" fill="rgb(221,10,30)"/><text x="2.3846%" y="78.50">wrapper (profile_geo.py:30)</text></g><g><title>test_ST_Area (profile_geo.py:105) (2,696 samples, 97.54%)</title><rect x="2.1346%" y="84" width="97.5398%" height="15" fill="rgb(210,229,1)"/><text x="2.3846%" y="94.50">test_ST_Area (profile_geo.py:105)</text></g><g><title>wrapper (arctern/_wrapper_func.py:99) (2,695 samples, 97.50%)</title><rect x="2.1708%" y="100" width="97.5036%" height="15" fill="rgb(222,148,37)"/><text x="2.4208%" y="110.50">wrapper (arctern/_wrapper_func.py:99)</text></g><g><title>ST_Area (arctern/_wrapper_func.py:839) (2,137 samples, 77.32%)</title><rect x="22.3589%" y="116" width="77.3155%" height="15" fill="rgb(234,67,33)"/><text x="22.6089%" y="126.50">ST_Area (arctern/_wrapper_func.py:839)</text></g><g><title>ST_Area (arctern_core_.pyx:123) (2,136 samples, 77.28%)</title><rect x="22.3951%" y="132" width="77.2793%" height="15" fill="rgb(247,98,35)"/><text x="22.6451%" y="142.50">ST_Area (arctern_core_.pyx:123)</text></g><g><title>ST_Area (arctern_core_.pyx:124) (2,136 samples, 77.28%)</title><rect x="22.3951%" y="148" width="77.2793%" height="15" fill="rgb(247,138,52)"/><text x="22.6451%" y="158.50">ST_Area (arctern_core_.pyx:124)</text></g><g><title>std::shared_ptr&lt;arrow::Array&gt;::operator= (shared_ptr.h:319) (2,136 samples, 77.28%)</title><rect x="22.3951%" y="164" width="77.2793%" height="15" fill="rgb(213,79,30)"/><text x="22.6451%" y="174.50">std::shared_ptr&lt;arrow::Array&gt;::operator= (shared_ptr.h:319)</text></g><g><title>std::__shared_ptr&lt;arrow::Array, (__gnu_cxx::_Lock_policy)2&gt;::operator= (shared_ptr_base.h:1213) (2,136 samples, 77.28%)</title><rect x="22.3951%" y="180" width="77.2793%" height="15" fill="rgb(246,177,23)"/><text x="22.6451%" y="190.50">std::__shared_ptr&lt;arrow::Array, (__gnu_cxx::_Lock_policy)2&gt;::operator= (shared_ptr_base.h:1213)</text></g><g><title>std::__shared_ptr&lt;arrow::Array, (__gnu_cxx::_Lock_policy)2&gt;::swap (shared_ptr_base.h:1275) (2,136 samples, 77.28%)</title><rect x="22.3951%" y="196" width="77.2793%" height="15" fill="rgb(230,62,27)"/><text x="22.6451%" y="206.50">std::__shared_ptr&lt;arrow::Array, (__gnu_cxx::_Lock_policy)2&gt;::swap (shared_ptr_base.h:1275)</text></g><g><title>std::__shared_count&lt;(__gnu_cxx::_Lock_policy)2&gt;::_M_swap (shared_ptr_base.h:712) (2,136 samples, 77.28%)</title><rect x="22.3951%" y="212" width="77.2793%" height="15" fill="rgb(216,154,8)"/><text x="22.6451%" y="222.50">std::__shared_count&lt;(__gnu_cxx::_Lock_policy)2&gt;::_M_swap (shared_ptr_base.h:712)</text></g><g><title>arctern::gis::ST_Area (libarctern.so) (2,136 samples, 77.28%)</title><rect x="22.3951%" y="228" width="77.2793%" height="15" fill="rgb(244,35,45)"/><text x="22.6451%" y="238.50">arctern::gis::ST_Area (libarctern.so)</text></g><g><title>arctern::gis::gdal::ST_Area (libarctern.so) (2,136 samples, 77.28%)</title><rect x="22.3951%" y="244" width="77.2793%" height="15" fill="rgb(251,115,12)"/><text x="22.6451%" y="254.50">arctern::gis::gdal::ST_Area (libarctern.so)</text></g><g><title>arctern::gis::gdal::UnaryOp&lt;arrow::NumericBuilder&lt;arrow::DoubleType&gt; &gt; (libarctern.so) (2,136 samples, 77.28%)</title><rect x="22.3951%" y="260" width="77.2793%" height="15" fill="rgb(240,54,50)"/><text x="22.6451%" y="270.50">arctern::gis::gdal::UnaryOp&lt;arrow::NumericBuilder&lt;arrow::DoubleType&gt; &gt; (libarctern.so)</text></g><g><title>std::_Function_handler&lt;void (arrow::NumericBuilder&lt;arrow::DoubleType&gt;&amp;, OGRGeometry*), arctern::gis::gdal::ST_Area(std::shared_ptr&lt;arrow::Array&gt; const&amp;)::{lambda(arrow::NumericBuilder&lt;arrow::DoubleType&gt;&amp;, OGRGeometry*)#1}&gt;::_M_invoke (libarctern.so) (319 samples, 11.54%)</title><rect x="88.1331%" y="276" width="11.5412%" height="15" fill="rgb(233,84,52)"/><text x="88.3831%" y="286.50">std::_Function_ha..</text></g><g><title>arrow::NumericBuilder&lt;arrow::DoubleType&gt;::Append (libarctern.so) (84 samples, 3.04%)</title><rect x="96.6353%" y="292" width="3.0391%" height="15" fill="rgb(207,117,47)"/><text x="96.8853%" y="302.50">arr..</text></g><g><title>all (2,764 samples, 100%)</title><rect x="0.0000%" y="36" width="100.0000%" height="15" fill="rgb(249,43,39)"/><text x="0.2500%" y="46.50"></text></g></svg></svg>

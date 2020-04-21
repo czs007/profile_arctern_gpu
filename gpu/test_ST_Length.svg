@@ -1,0 +1,419 @@
+<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg version="1.1" width="1200" height="582" onload="init(evt)" viewBox="0 0 1200 582" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><!--Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples.--><!--NOTES: --><defs><linearGradient id="background" y1="0" y2="1" x1="0" x2="0"><stop stop-color="#eeeeee" offset="5%"/><stop stop-color="#eeeeb0" offset="95%"/></linearGradient></defs><style type="text/css">
+text { font-family:"Verdana"; font-size:12px; fill:rgb(0,0,0); }
+#title { text-anchor:middle; font-size:17px; }
+#search { opacity:0.1; cursor:pointer; }
+#search:hover, #search.show { opacity:1; }
+#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+#unzoom { cursor:pointer; }
+#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+.hide { display:none; }
+.parent { opacity:0.5; }
+</style><script type="text/ecmascript"><![CDATA[var nametype = 'Function:';
+var fontsize = 12;
+var fontwidth = 0.59;
+var xpad = 10;
+var inverted = true;
+var searchcolor = 'rgb(230,0,230)';
+var fluiddrawing = true;
+var truncate_text_right = false;]]><![CDATA["use strict";
+var details, searchbtn, unzoombtn, matchedtxt, svg, searching, frames;
+function init(evt) {
+    details = document.getElementById("details").firstChild;
+    searchbtn = document.getElementById("search");
+    unzoombtn = document.getElementById("unzoom");
+    matchedtxt = document.getElementById("matched");
+    svg = document.getElementsByTagName("svg")[0];
+    frames = document.getElementById("frames");
+    searching = 0;
+
+    // Use GET parameters to restore a flamegraph's state.
+    var restore_state = function() {
+        var params = get_params();
+        if (params.x && params.y)
+            zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+        if (params.s)
+            search(params.s);
+    };
+
+    if (fluiddrawing) {
+        // Make width dynamic so the SVG fits its parent's width.
+        svg.removeAttribute("width");
+        // Edge requires us to have a viewBox that gets updated with size changes.
+        var isEdge = /Edge\/\d./i.test(navigator.userAgent);
+        if (!isEdge) {
+          svg.removeAttribute("viewBox");
+        }
+        var update_for_width_change = function() {
+            if (isEdge) {
+                svg.attributes.viewBox.value = "0 0 " + svg.width.baseVal.value + " " + svg.height.baseVal.value;
+            }
+
+            // Keep consistent padding on left and right of frames container.
+            frames.attributes.width.value = svg.width.baseVal.value - xpad * 2;
+
+            // Text truncation needs to be adjusted for the current width.
+            var el = frames.children;
+            for(var i = 0; i < el.length; i++) {
+                update_text(el[i]);
+            }
+
+            // Keep search elements at a fixed distance from right edge.
+            var svgWidth = svg.width.baseVal.value;
+            searchbtn.attributes.x.value = svgWidth - xpad - 100;
+            matchedtxt.attributes.x.value = svgWidth - xpad - 100;
+        };
+        window.addEventListener('resize', function() {
+            update_for_width_change();
+        });
+        // This needs to be done asynchronously for Safari to work.
+        setTimeout(function() {
+            unzoom();
+            update_for_width_change();
+            restore_state();
+        }, 0);
+    } else {
+        restore_state();
+    }
+}
+// event listeners
+window.addEventListener("click", function(e) {
+    var target = find_group(e.target);
+    if (target) {
+        if (target.nodeName == "a") {
+            if (e.ctrlKey === false) return;
+            e.preventDefault();
+        }
+        if (target.classList.contains("parent")) unzoom();
+        zoom(target);
+
+        // set parameters for zoom state
+        var el = target.querySelector("rect");
+        if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+            var params = get_params()
+            params.x = el.attributes._orig_x.value;
+            params.y = el.attributes.y.value;
+            history.replaceState(null, null, parse_params(params));
+        }
+    }
+    else if (e.target.id == "unzoom") {
+        unzoom();
+
+        // remove zoom state
+        var params = get_params();
+        if (params.x) delete params.x;
+        if (params.y) delete params.y;
+        history.replaceState(null, null, parse_params(params));
+    }
+    else if (e.target.id == "search") search_prompt();
+}, false)
+// mouse-over for info
+// show
+window.addEventListener("mouseover", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = nametype + " " + g_to_text(target);
+}, false)
+// clear
+window.addEventListener("mouseout", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = ' ';
+}, false)
+// ctrl-F for search
+window.addEventListener("keydown",function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+        e.preventDefault();
+        search_prompt();
+    }
+}, false)
+// functions
+function get_params() {
+    var params = {};
+    var paramsarr = window.location.search.substr(1).split('&');
+    for (var i = 0; i < paramsarr.length; ++i) {
+        var tmp = paramsarr[i].split("=");
+        if (!tmp[0] || !tmp[1]) continue;
+        params[tmp[0]]  = decodeURIComponent(tmp[1]);
+    }
+    return params;
+}
+function parse_params(params) {
+    var uri = "?";
+    for (var key in params) {
+        uri += key + '=' + encodeURIComponent(params[key]) + '&';
+    }
+    if (uri.slice(-1) == "&")
+        uri = uri.substring(0, uri.length - 1);
+    if (uri == '?')
+        uri = window.location.href.split('?')[0];
+    return uri;
+}
+function find_child(node, selector) {
+    var children = node.querySelectorAll(selector);
+    if (children.length) return children[0];
+    return;
+}
+function find_group(node) {
+    var parent = node.parentElement;
+    if (!parent) return;
+    if (parent.id == "frames") return node;
+    return find_group(parent);
+}
+function orig_save(e, attr, val) {
+    if (e.attributes["_orig_" + attr] != undefined) return;
+    if (e.attributes[attr] == undefined) return;
+    if (val == undefined) val = e.attributes[attr].value;
+    e.setAttribute("_orig_" + attr, val);
+}
+function orig_load(e, attr) {
+    if (e.attributes["_orig_"+attr] == undefined) return;
+    e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+    e.removeAttribute("_orig_" + attr);
+}
+function g_to_text(e) {
+    var text = find_child(e, "title").firstChild.nodeValue;
+    return (text)
+}
+function g_to_func(e) {
+    var func = g_to_text(e);
+    // if there's any manipulation we want to do to the function
+    // name before it's searched, do it here before returning.
+    return (func);
+}
+function update_text(e) {
+    var r = find_child(e, "rect");
+    var t = find_child(e, "text");
+    var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+    var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+    t.attributes.x.value = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+    // Smaller than this size won't fit anything
+    if (w < 2 * fontsize * fontwidth) {
+        t.textContent = "";
+        return;
+    }
+    t.textContent = txt;
+    // Fit in full text width
+    if (/^ *\$/.test(txt) || t.getComputedTextLength() < w)
+        return;
+    if (truncate_text_right) {
+        // Truncate the right side of the text.
+        for (var x = txt.length - 2; x > 0; x--) {
+            if (t.getSubStringLength(0, x + 2) <= w) {
+                t.textContent = txt.substring(0, x) + "..";
+                return;
+            }
+        }
+    } else {
+        // Truncate the left side of the text.
+        for (var x = 2; x < txt.length; x++) {
+            if (t.getSubStringLength(x - 2, txt.length) <= w) {
+                t.textContent = ".." + txt.substring(x, txt.length);
+                return;
+            }
+        }
+    }
+    t.textContent = "";
+}
+// zoom
+function zoom_reset(e) {
+    if (e.attributes != undefined) {
+        orig_load(e, "x");
+        orig_load(e, "width");
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_reset(c[i]);
+    }
+}
+function zoom_child(e, x, ratio) {
+    if (e.attributes != undefined) {
+        if (e.attributes.x != undefined) {
+            orig_save(e, "x");
+            e.attributes.x.value = format_percent((parseFloat(e.attributes.x.value) - x) * ratio);
+            if (e.tagName == "text") {
+                e.attributes.x.value = format_percent(parseFloat(find_child(e.parentNode, "rect[x]").attributes.x.value) + (100 * 3 / frames.attributes.width.value));
+            }
+        }
+        if (e.attributes.width != undefined) {
+            orig_save(e, "width");
+            e.attributes.width.value = format_percent(parseFloat(e.attributes.width.value) * ratio);
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_child(c[i], x, ratio);
+    }
+}
+function zoom_parent(e) {
+    if (e.attributes) {
+        if (e.attributes.x != undefined) {
+            orig_save(e, "x");
+            e.attributes.x.value = "0.0%";
+        }
+        if (e.attributes.width != undefined) {
+            orig_save(e, "width");
+            e.attributes.width.value = "100.0%";
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_parent(c[i]);
+    }
+}
+function zoom(node) {
+    var attr = find_child(node, "rect").attributes;
+    var width = parseFloat(attr.width.value);
+    var xmin = parseFloat(attr.x.value);
+    var xmax = xmin + width;
+    var ymin = parseFloat(attr.y.value);
+    var ratio = 100 / width;
+    // XXX: Workaround for JavaScript float issues (fix me)
+    var fudge = 0.001;
+    unzoombtn.classList.remove("hide");
+    var el = frames.children;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var a = find_child(e, "rect").attributes;
+        var ex = parseFloat(a.x.value);
+        var ew = parseFloat(a.width.value);
+        // Is it an ancestor
+        if (!inverted) {
+            var upstack = parseFloat(a.y.value) > ymin;
+        } else {
+            var upstack = parseFloat(a.y.value) < ymin;
+        }
+        if (upstack) {
+            // Direct ancestor
+            if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+                e.classList.add("parent");
+                zoom_parent(e);
+                update_text(e);
+            }
+            // not in current path
+            else
+                e.classList.add("hide");
+        }
+        // Children maybe
+        else {
+            // no common path
+            if (ex < xmin || ex + fudge >= xmax) {
+                e.classList.add("hide");
+            }
+            else {
+                zoom_child(e, xmin, ratio);
+                update_text(e);
+            }
+        }
+    }
+}
+function unzoom() {
+    unzoombtn.classList.add("hide");
+    var el = frames.children;
+    for(var i = 0; i < el.length; i++) {
+        el[i].classList.remove("parent");
+        el[i].classList.remove("hide");
+        zoom_reset(el[i]);
+        update_text(el[i]);
+    }
+}
+// search
+function reset_search() {
+    var el = document.querySelectorAll("#frames rect");
+    for (var i = 0; i < el.length; i++) {
+        orig_load(el[i], "fill")
+    }
+    var params = get_params();
+    delete params.s;
+    history.replaceState(null, null, parse_params(params));
+}
+function search_prompt() {
+    if (!searching) {
+        var term = prompt("Enter a search term (regexp " +
+            "allowed, eg: ^ext4_)", "");
+        if (term != null) {
+            search(term)
+        }
+    } else {
+        reset_search();
+        searching = 0;
+        searchbtn.classList.remove("show");
+        searchbtn.firstChild.nodeValue = "Search"
+        matchedtxt.classList.add("hide");
+        matchedtxt.firstChild.nodeValue = ""
+    }
+}
+function search(term) {
+    var re = new RegExp(term);
+    var el = frames.children;
+    var matches = new Object();
+    var maxwidth = 0;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var func = g_to_func(e);
+        var rect = find_child(e, "rect");
+        if (func == null || rect == null)
+            continue;
+        // Save max width. Only works as we have a root frame
+        var w = parseFloat(rect.attributes.width.value);
+        if (w > maxwidth)
+            maxwidth = w;
+        if (func.match(re)) {
+            // highlight
+            var x = parseFloat(rect.attributes.x.value);
+            orig_save(rect, "fill");
+            rect.attributes.fill.value = searchcolor;
+            // remember matches
+            if (matches[x] == undefined) {
+                matches[x] = w;
+            } else {
+                if (w > matches[x]) {
+                    // overwrite with parent
+                    matches[x] = w;
+                }
+            }
+            searching = 1;
+        }
+    }
+    if (!searching)
+        return;
+    var params = get_params();
+    params.s = term;
+    history.replaceState(null, null, parse_params(params));
+
+    searchbtn.classList.add("show");
+    searchbtn.firstChild.nodeValue = "Reset Search";
+    // calculate percent matched, excluding vertical overlap
+    var count = 0;
+    var lastx = -1;
+    var lastw = 0;
+    var keys = Array();
+    for (k in matches) {
+        if (matches.hasOwnProperty(k))
+            keys.push(k);
+    }
+    // sort the matched frames by their x location
+    // ascending, then width descending
+    keys.sort(function(a, b){
+        return a - b;
+    });
+    // Step through frames saving only the biggest bottom-up frames
+    // thanks to the sort order. This relies on the tree property
+    // where children are always smaller than their parents.
+    var fudge = 0.0001;    // JavaScript floating point
+    for (var k in keys) {
+        var x = parseFloat(keys[k]);
+        var w = matches[keys[k]];
+        if (x >= lastx + lastw - fudge) {
+            count += w;
+            lastx = x;
+            lastw = w;
+        }
+    }
+    // display matched percent
+    matchedtxt.classList.remove("hide");
+    var pct = 100 * count / maxwidth;
+    if (pct != 100) pct = pct.toFixed(1);
+    matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+}
+function format_percent(n) {
+    return n.toFixed(4) + "%";
+}
+]]></script><rect x="0" y="0" width="100%" height="582" fill="url(#background)"/><text id="title" x="50.0000%" y="24.00">py-spy</text><text id="details" x="10" y="565.00"> </text><text id="unzoom" class="hide" x="10" y="24.00">Reset Zoom</text><text id="search" x="1090" y="24.00">Search</text><text id="matched" x="1090" y="565.00"> </text><svg id="frames" x="10" width="1180"><g><title>&lt;module&gt; (profile_geo.py:142) (28 samples, 1.29%)</title><rect x="0.0000%" y="52" width="1.2939%" height="15" fill="rgb(227,0,7)"/><text x="0.2500%" y="62.50"></text></g><g><title>gen_st_length_data (profile_geo.py:53) (28 samples, 1.29%)</title><rect x="0.0000%" y="68" width="1.2939%" height="15" fill="rgb(217,0,24)"/><text x="0.2500%" y="78.50"></text></g><g><title>_trans (profile_geo.py:43) (27 samples, 1.25%)</title><rect x="0.0462%" y="84" width="1.2477%" height="15" fill="rgb(221,193,54)"/><text x="0.2962%" y="94.50"></text></g><g><title>__init__ (pandas/core/series.py:305) (27 samples, 1.25%)</title><rect x="0.0462%" y="100" width="1.2477%" height="15" fill="rgb(248,212,6)"/><text x="0.2962%" y="110.50"></text></g><g><title>0x7f443909b5e8 (libc-2.27.so) (36 samples, 1.66%)</title><rect x="14.2329%" y="292" width="1.6636%" height="15" fill="rgb(208,68,35)"/><text x="14.4829%" y="302.50"></text></g><g><title>0x7f443909b5eb (libc-2.27.so) (26 samples, 1.20%)</title><rect x="15.8965%" y="292" width="1.2015%" height="15" fill="rgb(232,128,0)"/><text x="16.1465%" y="302.50"></text></g><g><title>0x7f443909b5ef (libc-2.27.so) (34 samples, 1.57%)</title><rect x="17.0980%" y="292" width="1.5712%" height="15" fill="rgb(207,160,47)"/><text x="17.3480%" y="302.50"></text></g><g><title>0x7f443909b5f3 (libc-2.27.so) (31 samples, 1.43%)</title><rect x="18.6691%" y="292" width="1.4325%" height="15" fill="rgb(228,23,34)"/><text x="18.9191%" y="302.50"></text></g><g><title>0x7f443909b5f7 (libc-2.27.so) (57 samples, 2.63%)</title><rect x="20.1017%" y="292" width="2.6340%" height="15" fill="rgb(218,30,26)"/><text x="20.3517%" y="302.50">0x..</text></g><g><title>0x7f443909b78b (libc-2.27.so) (69 samples, 3.19%)</title><rect x="24.3993%" y="420" width="3.1885%" height="15" fill="rgb(220,122,19)"/><text x="24.6493%" y="430.50">0x7..</text></g><g><title>0x7f443909b7e1 (libc-2.27.so) (46 samples, 2.13%)</title><rect x="28.6506%" y="420" width="2.1257%" height="15" fill="rgb(250,228,42)"/><text x="28.9006%" y="430.50">0..</text></g><g><title>arrow::BufferBuilder::Resize (libarrow_python.so.16.0.0) (169 samples, 7.81%)</title><rect x="23.1516%" y="292" width="7.8096%" height="15" fill="rgb(240,193,28)"/><text x="23.4016%" y="302.50">arrow::Buff..</text></g><g><title>arrow::PoolBuffer::Resize (libarrow.so.16.0.0) (169 samples, 7.81%)</title><rect x="23.1516%" y="308" width="7.8096%" height="15" fill="rgb(216,20,37)"/><text x="23.4016%" y="318.50">arrow::Pool..</text></g><g><title>arrow::BaseMemoryPoolImpl&lt;arrow::(anonymous namespace)::JemallocAllocator&gt;::Reallocate (libarrow.so.16.0.0) (169 samples, 7.81%)</title><rect x="23.1516%" y="324" width="7.8096%" height="15" fill="rgb(206,188,39)"/><text x="23.4016%" y="334.50">arrow::Base..</text></g><g><title>je_arrow_rallocx (jemalloc.c:3279) (169 samples, 7.81%)</title><rect x="23.1516%" y="340" width="7.8096%" height="15" fill="rgb(217,207,13)"/><text x="23.4016%" y="350.50">je_arrow_ra..</text></g><g><title>iralloct (jemalloc_internal_inlines_c.h:192) (169 samples, 7.81%)</title><rect x="23.1516%" y="356" width="7.8096%" height="15" fill="rgb(231,73,38)"/><text x="23.4016%" y="366.50">iralloct (j..</text></g><g><title>je_arrow_private_je_arena_ralloc (arena.c:1823) (169 samples, 7.81%)</title><rect x="23.1516%" y="372" width="7.8096%" height="15" fill="rgb(225,20,46)"/><text x="23.4016%" y="382.50">je_arrow_pr..</text></g><g><title>je_arrow_private_je_large_ralloc (large.c:312) (169 samples, 7.81%)</title><rect x="23.1516%" y="388" width="7.8096%" height="15" fill="rgb(210,31,41)"/><text x="23.4016%" y="398.50">je_arrow_pr..</text></g><g><title>memcpy (string3.h:52) (169 samples, 7.81%)</title><rect x="23.1516%" y="404" width="7.8096%" height="15" fill="rgb(221,200,47)"/><text x="23.4016%" y="414.50">memcpy (str..</text></g><g><title>arrow::Status::Status (libarrow_python.so.16.0.0) (32 samples, 1.48%)</title><rect x="30.9612%" y="292" width="1.4787%" height="15" fill="rgb(226,26,5)"/><text x="31.2112%" y="302.50"></text></g><g><title>arrow::BaseBinaryBuilder&lt;arrow::BinaryType&gt;::Append (libarrow_python.so.16.0.0) (497 samples, 22.97%)</title><rect x="9.5194%" y="276" width="22.9667%" height="15" fill="rgb(249,33,26)"/><text x="9.7694%" y="286.50">arrow::BaseBinaryBuilder&lt;arrow::Bina..</text></g><g><title>arrow::Status::Status (libarrow_python.so.16.0.0) (22 samples, 1.02%)</title><rect x="32.4861%" y="276" width="1.0166%" height="15" fill="rgb(235,183,28)"/><text x="32.7361%" y="286.50"></text></g><g><title>arrow::py::detail::BuilderAppend (libarrow_python.so.16.0.0) (650 samples, 30.04%)</title><rect x="6.8392%" y="260" width="30.0370%" height="15" fill="rgb(221,5,38)"/><text x="7.0892%" y="270.50">arrow::py::detail::BuilderAppend (libarrow_pytho..</text></g><g><title>arrow::py::PyBytesView::FromString (libarrow_python.so.16.0.0) (64 samples, 2.96%)</title><rect x="33.9187%" y="276" width="2.9575%" height="15" fill="rgb(247,18,42)"/><text x="34.1687%" y="286.50">arr..</text></g><g><title>arrow::py::PyBytesView::FromBinary (libarrow_python.so.16.0.0) (36 samples, 1.66%)</title><rect x="35.2126%" y="292" width="1.6636%" height="15" fill="rgb(241,131,45)"/><text x="35.4626%" y="302.50"></text></g><g><title>ST_Length (arctern/_wrapper_func.py:896) (765 samples, 35.35%)</title><rect x="1.8946%" y="116" width="35.3512%" height="15" fill="rgb(249,31,29)"/><text x="2.1446%" y="126.50">ST_Length (arctern/_wrapper_func.py:896)</text></g><g><title>array (pyarrow/lib.cpython-38-x86_64-linux-gnu.so) (765 samples, 35.35%)</title><rect x="1.8946%" y="132" width="35.3512%" height="15" fill="rgb(225,111,53)"/><text x="2.1446%" y="142.50">array (pyarrow/lib.cpython-38-x86_64-linux-gnu.so)</text></g><g><title>lib__ndarray_to_array (pyarrow/lib.cpython-38-x86_64-linux-gnu.so) (765 samples, 35.35%)</title><rect x="1.8946%" y="148" width="35.3512%" height="15" fill="rgb(238,160,17)"/><text x="2.1446%" y="158.50">lib__ndarray_to_array (pyarrow/lib.cpython-38-x86_64-linu..</text></g><g><title>arrow::py::NdarrayToArrow (libarrow_python.so.16.0.0) (765 samples, 35.35%)</title><rect x="1.8946%" y="164" width="35.3512%" height="15" fill="rgb(214,148,48)"/><text x="2.1446%" y="174.50">arrow::py::NdarrayToArrow (libarrow_python.so.16.0.0)</text></g><g><title>arrow::py::NumPyConverter::Convert (libarrow_python.so.16.0.0) (765 samples, 35.35%)</title><rect x="1.8946%" y="180" width="35.3512%" height="15" fill="rgb(232,36,49)"/><text x="2.1446%" y="190.50">arrow::py::NumPyConverter::Convert (libarrow_python.so.16..</text></g><g><title>arrow::py::ConvertPySequence (libarrow_python.so.16.0.0) (765 samples, 35.35%)</title><rect x="1.8946%" y="196" width="35.3512%" height="15" fill="rgb(209,103,24)"/><text x="2.1446%" y="206.50">arrow::py::ConvertPySequence (libarrow_python.so.16.0.0)</text></g><g><title>arrow::py::TypedConverter&lt;arrow::BinaryType, arrow::py::BinaryLikeConverter&lt;arrow::BinaryType, (arrow::py::NullCoding)1&gt;, (arrow::py::NullCoding)1&gt;::AppendMultiple (libarrow_python.so.16.0.0) (765 samples, 35.35%)</title><rect x="1.8946%" y="212" width="35.3512%" height="15" fill="rgb(229,88,8)"/><text x="2.1446%" y="222.50">arrow::py::TypedConverter&lt;arrow::BinaryType, arrow::py::B..</text></g><g><title>arrow::py::internal::VisitSequenceGeneric&lt;arrow::Status arrow::py::internal::VisitSequence&lt;arrow::py::TypedConverter&lt;arrow::BinaryType, arrow::py::BinaryLikeConverter&lt;arrow::BinaryType, (arrow::py::NullCoding)1&gt;, (arrow::py::NullCoding)1&gt;::AppendMultiple(_object*, long)::{lambda(_object*, bool*)#1}&gt;(_object*, arrow::py::TypedConverter&lt;arrow::BinaryType, arrow::py::BinaryLikeConverter&lt;arrow::BinaryType, (arrow::py::NullCoding)1&gt;, (arrow::py::NullCoding)1&gt;::AppendMultiple(_object*, long)::{lambda(_object*, bool*)#1}&amp;&amp;)::{lambda(_object*, long, bool*)#1}&gt; (libarrow_python.so.16.0.0) (765 samples, 35.35%)</title><rect x="1.8946%" y="228" width="35.3512%" height="15" fill="rgb(213,181,19)"/><text x="2.1446%" y="238.50">arrow::py::internal::VisitSequenceGeneric&lt;arrow::Status a..</text></g><g><title>arrow::py::TypedConverter&lt;arrow::BinaryType, arrow::py::BinaryLikeConverter&lt;arrow::BinaryType, (arrow::py::NullCoding)1&gt;, (arrow::py::NullCoding)1&gt;::AppendSingle (libarrow_python.so.16.0.0) (717 samples, 33.13%)</title><rect x="4.1128%" y="244" width="33.1331%" height="15" fill="rgb(254,191,54)"/><text x="4.3628%" y="254.50">arrow::py::TypedConverter&lt;arrow::BinaryType, arrow::py..</text></g><g><title>0x4 (?) (26 samples, 1.20%)</title><rect x="37.2458%" y="132" width="1.2015%" height="15" fill="rgb(241,83,37)"/><text x="37.4958%" y="142.50"></text></g><g><title>clock_gettime (libc-2.27.so) (26 samples, 1.20%)</title><rect x="37.2458%" y="148" width="1.2015%" height="15" fill="rgb(233,36,39)"/><text x="37.4958%" y="158.50"></text></g><g><title>0x7ffe617399ef ([vdso]) (26 samples, 1.20%)</title><rect x="37.2458%" y="164" width="1.2015%" height="15" fill="rgb(226,3,54)"/><text x="37.4958%" y="174.50"></text></g><g><title>0x7f443916ee5e (libc-2.27.so) (22 samples, 1.02%)</title><rect x="39.2791%" y="260" width="1.0166%" height="15" fill="rgb(245,192,40)"/><text x="39.5291%" y="270.50"></text></g><g><title>std::vector&lt;double, std::allocator&lt;double&gt; &gt;::_M_default_append (libarctern.so) (306 samples, 14.14%)</title><rect x="42.5139%" y="308" width="14.1405%" height="15" fill="rgb(238,167,29)"/><text x="42.7639%" y="318.50">std::vector&lt;double, s..</text></g><g><title>0x7f443916ef2d (libc-2.27.so) (306 samples, 14.14%)</title><rect x="42.5139%" y="324" width="14.1405%" height="15" fill="rgb(232,182,51)"/><text x="42.7639%" y="334.50">0x7f443916ef2d (libc-..</text></g><g><title>arctern::gis::cuda::GeometryVector::OutputEvolveWith (libarctern.so) (341 samples, 15.76%)</title><rect x="41.4972%" y="292" width="15.7579%" height="15" fill="rgb(231,60,39)"/><text x="41.7472%" y="302.50">arctern::gis::cuda::Geom..</text></g><g><title>0x7f436345f7f2 (libcuda.so.440.64.00) (92 samples, 4.25%)</title><rect x="57.3013%" y="436" width="4.2514%" height="15" fill="rgb(208,69,12)"/><text x="57.5513%" y="446.50">0x7f4..</text></g><g><title>0x7f436332b437 (libcuda.so.440.64.00) (23 samples, 1.06%)</title><rect x="66.2200%" y="532" width="1.0628%" height="15" fill="rgb(235,93,37)"/><text x="66.4700%" y="542.50"></text></g><g><title>0x7f43634ec83a (libcuda.so.440.64.00) (31 samples, 1.43%)</title><rect x="66.1275%" y="516" width="1.4325%" height="15" fill="rgb(213,116,39)"/><text x="66.3775%" y="526.50"></text></g><g><title>0x7f436327cfaf (libcuda.so.440.64.00) (92 samples, 4.25%)</title><rect x="64.9261%" y="500" width="4.2514%" height="15" fill="rgb(222,207,29)"/><text x="65.1761%" y="510.50">0x7f4..</text></g><g><title>0x7f436327d0b7 (libcuda.so.440.64.00) (44 samples, 2.03%)</title><rect x="69.7320%" y="500" width="2.0333%" height="15" fill="rgb(206,96,30)"/><text x="69.9820%" y="510.50">0..</text></g><g><title>0x7f4363328780 (libcuda.so.440.64.00) (244 samples, 11.28%)</title><rect x="63.5397%" y="484" width="11.2754%" height="15" fill="rgb(218,138,4)"/><text x="63.7897%" y="494.50">0x7f4363328780 (l..</text></g><g><title>0x7f436327d133 (libcuda.so.440.64.00) (55 samples, 2.54%)</title><rect x="72.2736%" y="500" width="2.5416%" height="15" fill="rgb(250,191,14)"/><text x="72.5236%" y="510.50">0x..</text></g><g><title>0x7f436345f547 (libcuda.so.440.64.00) (261 samples, 12.06%)</title><rect x="62.9852%" y="452" width="12.0610%" height="15" fill="rgb(239,60,40)"/><text x="63.2352%" y="462.50">0x7f436345f547 (li..</text></g><g><title>0x7f436332891f (libcuda.so.440.64.00) (260 samples, 12.01%)</title><rect x="63.0314%" y="468" width="12.0148%" height="15" fill="rgb(206,27,48)"/><text x="63.2814%" y="478.50">0x7f436332891f (li..</text></g><g><title>0x7f436345f804 (libcuda.so.440.64.00) (311 samples, 14.37%)</title><rect x="61.5989%" y="436" width="14.3715%" height="15" fill="rgb(225,35,8)"/><text x="61.8489%" y="446.50">0x7f436345f804 (libcud..</text></g><g><title>0x7f4363481653 (libcuda.so.440.64.00) (434 samples, 20.06%)</title><rect x="57.2551%" y="420" width="20.0555%" height="15" fill="rgb(250,213,24)"/><text x="57.5051%" y="430.50">0x7f4363481653 (libcuda.so.440...</text></g><g><title>0x7f4363299634 (libcuda.so.440.64.00) (66 samples, 3.05%)</title><rect x="77.3105%" y="452" width="3.0499%" height="15" fill="rgb(247,123,22)"/><text x="77.5605%" y="462.50">0x7..</text></g><g><title>arctern::gis::cuda::GeometryVector::OutputFinalizeWith (libarctern.so) (520 samples, 24.03%)</title><rect x="57.2551%" y="292" width="24.0296%" height="15" fill="rgb(231,138,38)"/><text x="57.5051%" y="302.50">arctern::gis::cuda::GeometryVector::Ou..</text></g><g><title>cudaMemcpy (libarctern.so) (520 samples, 24.03%)</title><rect x="57.2551%" y="308" width="24.0296%" height="15" fill="rgb(231,145,46)"/><text x="57.5051%" y="318.50">cudaMemcpy (libarctern.so)</text></g><g><title>cudart::cudaApiMemcpy (libarctern.so) (520 samples, 24.03%)</title><rect x="57.2551%" y="324" width="24.0296%" height="15" fill="rgb(251,118,11)"/><text x="57.5051%" y="334.50">cudart::cudaApiMemcpy (libarctern.so)</text></g><g><title>cudart::driverHelper::memcpyDispatch (libarctern.so) (520 samples, 24.03%)</title><rect x="57.2551%" y="340" width="24.0296%" height="15" fill="rgb(217,147,25)"/><text x="57.5051%" y="350.50">cudart::driverHelper::memcpyDispatch (..</text></g><g><title>cuMemcpy (libcuda.so.440.64.00) (520 samples, 24.03%)</title><rect x="57.2551%" y="356" width="24.0296%" height="15" fill="rgb(247,81,37)"/><text x="57.5051%" y="366.50">cuMemcpy (libcuda.so.440.64.00)</text></g><g><title>0x7f43632608c4 (libcuda.so.440.64.00) (520 samples, 24.03%)</title><rect x="57.2551%" y="372" width="24.0296%" height="15" fill="rgb(209,12,38)"/><text x="57.5051%" y="382.50">0x7f43632608c4 (libcuda.so.440.64.00)</text></g><g><title>0x7f4363260612 (libcuda.so.440.64.00) (520 samples, 24.03%)</title><rect x="57.2551%" y="388" width="24.0296%" height="15" fill="rgb(227,1,9)"/><text x="57.5051%" y="398.50">0x7f4363260612 (libcuda.so.440.64.00)</text></g><g><title>0x7f436335bd88 (libcuda.so.440.64.00) (520 samples, 24.03%)</title><rect x="57.2551%" y="404" width="24.0296%" height="15" fill="rgb(248,47,43)"/><text x="57.5051%" y="414.50">0x7f436335bd88 (libcuda.so.440.64.00)</text></g><g><title>0x7f4363481696 (libcuda.so.440.64.00) (86 samples, 3.97%)</title><rect x="77.3105%" y="420" width="3.9741%" height="15" fill="rgb(221,10,30)"/><text x="77.5605%" y="430.50">0x7f..</text></g><g><title>0x7f436335b5ce (libcuda.so.440.64.00) (86 samples, 3.97%)</title><rect x="77.3105%" y="436" width="3.9741%" height="15" fill="rgb(210,229,1)"/><text x="77.5605%" y="446.50">0x7f..</text></g><g><title>0x7f443916ef2d (libc-2.27.so) (41 samples, 1.89%)</title><rect x="81.2847%" y="308" width="1.8946%" height="15" fill="rgb(222,148,37)"/><text x="81.5347%" y="318.50">0..</text></g><g><title>arctern::gis::cuda::internal::ArrowWkbToGeometryVectorImpl (libarctern.so) (918 samples, 42.42%)</title><rect x="41.2662%" y="276" width="42.4214%" height="15" fill="rgb(234,67,33)"/><text x="41.5162%" y="286.50">arctern::gis::cuda::internal::ArrowWkbToGeometryVectorImpl (libarcter..</text></g><g><title>arctern::gis::cuda::GeometryVector::OutputInitialize (libarctern.so) (52 samples, 2.40%)</title><rect x="81.2847%" y="292" width="2.4030%" height="15" fill="rgb(247,98,35)"/><text x="81.5347%" y="302.50">ar..</text></g><g><title>0x7f4363299634 (libcuda.so.440.64.00) (86 samples, 3.97%)</title><rect x="84.2884%" y="420" width="3.9741%" height="15" fill="rgb(247,138,52)"/><text x="84.5384%" y="430.50">0x7f..</text></g><g><title>arctern::gis::cuda::ArrowWkbToGeometryVector (libarctern.so) (1,042 samples, 48.15%)</title><rect x="41.2662%" y="260" width="48.1516%" height="15" fill="rgb(213,79,30)"/><text x="41.5162%" y="270.50">arctern::gis::cuda::ArrowWkbToGeometryVector (libarctern.so)</text></g><g><title>cudaMemcpy (libarctern.so) (115 samples, 5.31%)</title><rect x="84.1035%" y="276" width="5.3142%" height="15" fill="rgb(246,177,23)"/><text x="84.3535%" y="286.50">cudaMem..</text></g><g><title>cudart::cudaApiMemcpy (libarctern.so) (115 samples, 5.31%)</title><rect x="84.1035%" y="292" width="5.3142%" height="15" fill="rgb(230,62,27)"/><text x="84.3535%" y="302.50">cudart:..</text></g><g><title>cudart::driverHelper::memcpyDispatch (libarctern.so) (115 samples, 5.31%)</title><rect x="84.1035%" y="308" width="5.3142%" height="15" fill="rgb(216,154,8)"/><text x="84.3535%" y="318.50">cudart:..</text></g><g><title>cuMemcpy (libcuda.so.440.64.00) (115 samples, 5.31%)</title><rect x="84.1035%" y="324" width="5.3142%" height="15" fill="rgb(244,35,45)"/><text x="84.3535%" y="334.50">cuMemcp..</text></g><g><title>0x7f43632608c4 (libcuda.so.440.64.00) (115 samples, 5.31%)</title><rect x="84.1035%" y="340" width="5.3142%" height="15" fill="rgb(251,115,12)"/><text x="84.3535%" y="350.50">0x7f436..</text></g><g><title>0x7f4363260612 (libcuda.so.440.64.00) (115 samples, 5.31%)</title><rect x="84.1035%" y="356" width="5.3142%" height="15" fill="rgb(240,54,50)"/><text x="84.3535%" y="366.50">0x7f436..</text></g><g><title>0x7f436335bd25 (libcuda.so.440.64.00) (115 samples, 5.31%)</title><rect x="84.1035%" y="372" width="5.3142%" height="15" fill="rgb(233,84,52)"/><text x="84.3535%" y="382.50">0x7f436..</text></g><g><title>0x7f4363481168 (libcuda.so.440.64.00) (112 samples, 5.18%)</title><rect x="84.2421%" y="388" width="5.1756%" height="15" fill="rgb(207,117,47)"/><text x="84.4921%" y="398.50">0x7f43..</text></g><g><title>0x7f436335b5ce (libcuda.so.440.64.00) (112 samples, 5.18%)</title><rect x="84.2421%" y="404" width="5.1756%" height="15" fill="rgb(249,43,39)"/><text x="84.4921%" y="414.50">0x7f43..</text></g><g><title>0x7f4363299640 (libcuda.so.440.64.00) (60 samples, 2.77%)</title><rect x="90.7579%" y="452" width="2.7726%" height="15" fill="rgb(209,38,44)"/><text x="91.0079%" y="462.50">0x..</text></g><g><title>arctern::gis::cuda::GpuMemcpy&lt;double&gt; (libarctern.so) (77 samples, 3.56%)</title><rect x="90.1109%" y="292" width="3.5582%" height="15" fill="rgb(236,212,23)"/><text x="90.3609%" y="302.50">arct..</text></g><g><title>cudaMemcpy (libarctern.so) (77 samples, 3.56%)</title><rect x="90.1109%" y="308" width="3.5582%" height="15" fill="rgb(242,79,21)"/><text x="90.3609%" y="318.50">cuda..</text></g><g><title>cudart::cudaApiMemcpy (libarctern.so) (77 samples, 3.56%)</title><rect x="90.1109%" y="324" width="3.5582%" height="15" fill="rgb(211,96,35)"/><text x="90.3609%" y="334.50">cuda..</text></g><g><title>cudart::driverHelper::memcpyDispatch (libarctern.so) (77 samples, 3.56%)</title><rect x="90.1109%" y="340" width="3.5582%" height="15" fill="rgb(253,215,40)"/><text x="90.3609%" y="350.50">cuda..</text></g><g><title>cuMemcpy (libcuda.so.440.64.00) (77 samples, 3.56%)</title><rect x="90.1109%" y="356" width="3.5582%" height="15" fill="rgb(211,81,21)"/><text x="90.3609%" y="366.50">cuMe..</text></g><g><title>0x7f43632608c4 (libcuda.so.440.64.00) (77 samples, 3.56%)</title><rect x="90.1109%" y="372" width="3.5582%" height="15" fill="rgb(208,190,38)"/><text x="90.3609%" y="382.50">0x7f..</text></g><g><title>0x7f4363260612 (libcuda.so.440.64.00) (77 samples, 3.56%)</title><rect x="90.1109%" y="388" width="3.5582%" height="15" fill="rgb(235,213,38)"/><text x="90.3609%" y="398.50">0x7f..</text></g><g><title>0x7f436335bd25 (libcuda.so.440.64.00) (77 samples, 3.56%)</title><rect x="90.1109%" y="404" width="3.5582%" height="15" fill="rgb(237,122,38)"/><text x="90.3609%" y="414.50">0x7f..</text></g><g><title>0x7f4363481168 (libcuda.so.440.64.00) (73 samples, 3.37%)</title><rect x="90.2957%" y="420" width="3.3734%" height="15" fill="rgb(244,218,35)"/><text x="90.5457%" y="430.50">0x7..</text></g><g><title>0x7f436335b5ce (libcuda.so.440.64.00) (73 samples, 3.37%)</title><rect x="90.2957%" y="436" width="3.3734%" height="15" fill="rgb(240,68,47)"/><text x="90.5457%" y="446.50">0x7..</text></g><g><title>arctern::gis::cuda::GeometryVector::CreateReadGpuContext (libarctern.so) (105 samples, 4.85%)</title><rect x="89.4177%" y="276" width="4.8521%" height="15" fill="rgb(210,16,53)"/><text x="89.6677%" y="286.50">arcter..</text></g><g><title>arctern::gis::cuda::ST_Length (libarctern.so) (115 samples, 5.31%)</title><rect x="89.4177%" y="260" width="5.3142%" height="15" fill="rgb(235,124,12)"/><text x="89.6677%" y="270.50">arctern..</text></g><g><title>arctern::gis::cuda::ST_Length (libarctern.so) (1,224 samples, 56.56%)</title><rect x="38.9556%" y="244" width="56.5619%" height="15" fill="rgb(224,169,11)"/><text x="39.2056%" y="254.50">arctern::gis::cuda::ST_Length (libarctern.so)</text></g><g><title>ST_Length (arctern_core_.pyx:129) (1,283 samples, 59.29%)</title><rect x="38.9094%" y="132" width="59.2884%" height="15" fill="rgb(250,166,2)"/><text x="39.1594%" y="142.50">ST_Length (arctern_core_.pyx:129)</text></g><g><title>ST_Length (arctern_core_.pyx:130) (1,283 samples, 59.29%)</title><rect x="38.9094%" y="148" width="59.2884%" height="15" fill="rgb(242,216,29)"/><text x="39.1594%" y="158.50">ST_Length (arctern_core_.pyx:130)</text></g><g><title>std::shared_ptr&lt;arrow::Array&gt;::operator= (shared_ptr.h:319) (1,282 samples, 59.24%)</title><rect x="38.9556%" y="164" width="59.2421%" height="15" fill="rgb(230,116,27)"/><text x="39.2056%" y="174.50">std::shared_ptr&lt;arrow::Array&gt;::operator= (shared_ptr.h:319)</text></g><g><title>std::__shared_ptr&lt;arrow::Array, (__gnu_cxx::_Lock_policy)2&gt;::operator= (shared_ptr_base.h:1213) (1,282 samples, 59.24%)</title><rect x="38.9556%" y="180" width="59.2421%" height="15" fill="rgb(228,99,48)"/><text x="39.2056%" y="190.50">std::__shared_ptr&lt;arrow::Array, (__gnu_cxx::_Lock_policy)2&gt;::operator= (shared_ptr_base.h:1213)</text></g><g><title>std::__shared_ptr&lt;arrow::Array, (__gnu_cxx::_Lock_policy)2&gt;::swap (shared_ptr_base.h:1275) (1,282 samples, 59.24%)</title><rect x="38.9556%" y="196" width="59.2421%" height="15" fill="rgb(253,11,6)"/><text x="39.2056%" y="206.50">std::__shared_ptr&lt;arrow::Array, (__gnu_cxx::_Lock_policy)2&gt;::swap (shared_ptr_base.h:1275)</text></g><g><title>std::__shared_count&lt;(__gnu_cxx::_Lock_policy)2&gt;::_M_swap (shared_ptr_base.h:712) (1,282 samples, 59.24%)</title><rect x="38.9556%" y="212" width="59.2421%" height="15" fill="rgb(247,143,39)"/><text x="39.2056%" y="222.50">std::__shared_count&lt;(__gnu_cxx::_Lock_policy)2&gt;::_M_swap (shared_ptr_base.h:712)</text></g><g><title>arctern::gis::ST_Length (libarctern.so) (1,282 samples, 59.24%)</title><rect x="38.9556%" y="228" width="59.2421%" height="15" fill="rgb(236,97,10)"/><text x="39.2056%" y="238.50">arctern::gis::ST_Length (libarctern.so)</text></g><g><title>arctern::gis::dispatch::MaskResult::AppendFilter (libarctern.so) (58 samples, 2.68%)</title><rect x="95.5176%" y="244" width="2.6802%" height="15" fill="rgb(233,208,19)"/><text x="95.7676%" y="254.50">ar..</text></g><g><title>arctern::gis::dispatch::MaskResult::AppendFilter (libarctern.so) (58 samples, 2.68%)</title><rect x="95.5176%" y="260" width="2.6802%" height="15" fill="rgb(216,164,2)"/><text x="95.7676%" y="270.50">ar..</text></g><g><title>arctern::gis::dispatch::WkbTypeScanner::Scan (libarctern.so) (58 samples, 2.68%)</title><rect x="95.5176%" y="276" width="2.6802%" height="15" fill="rgb(220,129,5)"/><text x="95.7676%" y="286.50">ar..</text></g><g><title>ST_Length (arctern/_wrapper_func.py:897) (1,321 samples, 61.04%)</title><rect x="37.2458%" y="116" width="61.0444%" height="15" fill="rgb(242,17,10)"/><text x="37.4958%" y="126.50">ST_Length (arctern/_wrapper_func.py:897)</text></g><g><title>&lt;module&gt; (profile_geo.py:157) (2,099 samples, 97.00%)</title><rect x="1.8946%" y="52" width="96.9963%" height="15" fill="rgb(242,107,0)"/><text x="2.1446%" y="62.50">&lt;module&gt; (profile_geo.py:157)</text></g><g><title>wrapper (profile_geo.py:30) (2,099 samples, 97.00%)</title><rect x="1.8946%" y="68" width="96.9963%" height="15" fill="rgb(251,28,31)"/><text x="2.1446%" y="78.50">wrapper (profile_geo.py:30)</text></g><g><title>test_ST_Length (profile_geo.py:101) (2,099 samples, 97.00%)</title><rect x="1.8946%" y="84" width="96.9963%" height="15" fill="rgb(233,223,10)"/><text x="2.1446%" y="94.50">test_ST_Length (profile_geo.py:101)</text></g><g><title>wrapper (arctern/_wrapper_func.py:99) (2,099 samples, 97.00%)</title><rect x="1.8946%" y="100" width="96.9963%" height="15" fill="rgb(215,21,27)"/><text x="2.1446%" y="110.50">wrapper (arctern/_wrapper_func.py:99)</text></g><g><title>all (2,164 samples, 100%)</title><rect x="0.0000%" y="36" width="100.0000%" height="15" fill="rgb(232,23,21)"/><text x="0.2500%" y="46.50"></text></g></svg></svg>
