@@ -19,7 +19,7 @@ import arctern
 
 rows = 10000000
 func_name = 0
-execute_times = 10
+execute_times = 1
 
 import time
 output_path = "./output.txt"
@@ -46,13 +46,19 @@ def _trans(data):
 def _trans2(data):
     data_array = [data]*rows
     data = pandas.Series(data_array)
-    data = arctern.ST_GeomFromText(data)
+    print("HEHE\n")
+    #data = arctern.ST_GeomFromText(data)
     return data
 
 
 
 def gen_st_envelope_data():
     data = _trans('LINESTRING(77.29 29.07,77.42 29.26,77.27 29.31,77.29 29.07)')
+    return data
+
+
+def gen_st_geomfromtxt():
+    data = _trans2("POLYGON ((113.66220266388723 22.39277623851494, 114.58136061218778 22.39277623851494, 114.58136061218778 22.92800492531275 ,113.66220266388723 22.92800492531275, 113.66220266388723 22.39277623851494))")
     return data
 
 
@@ -87,6 +93,9 @@ def gen_st_distance_data():
     return data1, data2
 
 
+@timmer
+def test_ST_GeomFromTxt():
+    string_ptr =arctern.ST_GeomFromText(data_geom)
 
 @timmer
 def test_ST_Point():
@@ -141,7 +150,11 @@ if __name__ == "__main__":
         test_ST_Area,
         test_ST_Length,
         test_ST_Envelope,
+        test_ST_GeomFromTxt,
         ]
+
+    if func_name == 6:
+        data_geom = gen_st_geomfromtxt()
 
     if func_name == 5:
         data_envelope = gen_st_envelope_data()
